@@ -191,4 +191,31 @@ func nodeSplit2(left BNode, right BNode, old BNode) {
 	assert(right.nbytes() <= BTREE_PAGE_SIZE)
 }
 
+// split a node further if its too big
+func nodeSplit3(old BNode) (uint16, [3]BNode) {
+	if old.nbytes() <= BTREE_PAGE_SIZE {
+		old = old[:BTREE_PAGE_SIZE]
+		return 1, [3]BNode{old}
+	}
+	/*
+		incase original node is larger then 2x page size
+		allocate a larger left since we are only guarenteeing the right
+		page to fit, with the expense of making the left much larger
+		than 1 page. 
+	*/
+	left := BNode(make([]byte, 2*BTREE_PAGE_SIZE)) 
+	right := BNode(make([]byte, BTREE_PAGE_SIZE))
+	nodeSplit2(left, right, old)
+	if left.nbytes() <= BTREE_PAGE_SIZE {
+		left := left[:BTREE_PAGE_SIZE]
+		return 2, [3]BNode{left, right}
+	}
+
+	leftleft := BNode(make([]byte, BTREE_PAGE_SIZE))
+	middle := BNode(make([]byte, BTREE_PAGE_SIZE))
+	nodeSplit2(leftleft, middle, left)
+	assert(leftleft.nbytes() <= BTREE_PAGE_SIZE)
+	
+	return 3, [3]BNode{leftleft, middle, right}
+}
 
