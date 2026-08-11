@@ -1,7 +1,9 @@
-package main 
+package main
 
-import "encoding/binary"
-
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // A node is just a byte slice in our page format. It can be written to disk as-is.
 //
@@ -40,6 +42,7 @@ func (node BNode) setPtr(idx uint16, val uint64) {
 	binary.LittleEndian.PutUint64(node[pos:], val)
 }
 
+
 // get offset 
 func (node BNode) getOffset(idx uint16) uint16 {
 	if idx == 0 {
@@ -58,6 +61,9 @@ func (node BNode) setOffset(idx uint16, offset uint16) {
 	pos := 4 + 8*node.nkeys() + 2*(idx-1)
 	binary.LittleEndian.PutUint16(node[pos:], offset)
 }
+
+
+
 
 func (node BNode) kvPos(idx uint16) uint16 {
 	assert(idx <= node.nkeys())
@@ -103,6 +109,8 @@ func (node BNode) nbytes() uint16 {
 	return node.kvPos(node.nkeys())
 }
 
+
+
 func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16) {
 	for i := uint16(0); i < n; i++ {
 		dst, src := dstNew+i, srcOld+i
@@ -118,7 +126,6 @@ func leafInsert(new BNode, old BNode, idx uint16, key []byte, val []byte) {
 	nodeAppendRange(new, old, idx+1, idx, old.nkeys()-idx)
 }
 
-
 // replce existing key
 func leafUpdate(new BNode, old BNode, idx uint16, key []byte, val []byte) {
 	new.setHeader(BNODE_LEAF, old.nkeys())
@@ -126,4 +133,62 @@ func leafUpdate(new BNode, old BNode, idx uint16, key []byte, val []byte) {
 	nodeAppendKV(new, idx, 0, key, val)
 	nodeAppendRange(new, old, idx+1, idx+1, old.nkeys()-(idx+1))
 }
+
+
+
+// find the last position that is less than or equal to the key
+func nodeLookupLE(node BNode, key []byte) uint16 {
+	nkeys := node.nkeys()
+	var i uint16
+	for i = 0; i < nkeys; i++ {
+		cmp := bytes.Compare(node.getKey(i), key)
+		if cmp == 0{
+			return i
+		}
+		if cmp > 0 {
+			return i - 1
+		}
+	}
+
+	return i - 1
+}
+
+// Split an oversized node into 2 nodes. The 2nd node always fits.
+func nodeSplit2(left BNode, right BNode, old BNode) {
+	assert(old.nkeys() >= 2)
+
+	// guess size
+	nleft := old.nkeys() / 2
+
+
+	// try to fit the left half
+	left_bytes := func() uint16 {
+		return 4 + 8*nleft + 2*nleft + old.getOffset(nleft)
+	}
+	for left_bytes() > BTREE_PAGE_SIZE {
+		nleft--
+	}
+	assert(nleft >= 1)
+
+
+	// once we know the size of left half, fit the right half
+	right_bytes := func() uint16 {
+		return old.nbytes() - left_bytes() + 4
+	}
+	for right_bytes() > BTREE_PAGE_SIZE {
+		nleft++
+	}
+	assert(nleft < uint16(old.nkeys()))
+	nright := old.nkeys() - nleft
+
+	// copy new nodes
+	left.setHeader(old.btype(), nleft)
+	right.setHeader(old.btype(), nright)
+	nodeAppendRange(left, old, 0, 0, nleft)
+	nodeAppendRange(right, old, 0, nleft, nright)
+
+
+	assert(right.nbytes() <= BTREE_PAGE_SIZE)
+}
+
 
