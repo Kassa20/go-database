@@ -1,0 +1,1 @@
+ look at 04.md file. Im new to go. I'm following the tutoral but im not sure where to write the functions or the implementation in my code. Guide me through it. Put your output in 04-implementation.md
