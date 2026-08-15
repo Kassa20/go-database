@@ -13,6 +13,8 @@ type BTree struct {
 }
 
 
+// always insert to a leaf node, propagate the changes upward 
+// not inserting in-place, so we need a new node to copy to
 func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
 
 	new := BNode(make([]byte, 2*BTREE_PAGE_SIZE))
@@ -45,6 +47,7 @@ func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
 	return new
 }
 
+// update a nodes pointer to point to each of the newly split kid nodes
 func nodeReplaceKidN(
 	tree *BTree, new BNode, old BNode, idx uint16, kids ...BNode,
 ) {
