@@ -52,3 +52,28 @@ func (tree *BTree) Insert(key []byte, val []byte) error {
 
 	return nil
 }
+
+// should the updated kid be merged with a sibling? 
+func shouldMerge(
+	tree *BTree, node BNode, idx uint16, updated BNode,
+) (int, BNode) {
+	if updated.nbytes() > BTREE_PAGE_SIZE/4 {
+		return 0, BNode{}
+	}
+	if idx > 0 {
+		sibling := BNode(tree.get(node.getPtr(idx-1)))
+		merged := sibling.nbytes() + updated.nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return -1, sibling // left 
+		}
+	}
+	if idx+1 < node.nkeys() {
+		sibling := BNode(tree.get(node.getPtr(idx+1)))
+		merged := sibling.nbytes() + updated.nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return +1, sibling // right
+		}
+	}
+
+	return 0, BNode{}
+}
