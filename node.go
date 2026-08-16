@@ -134,7 +134,27 @@ func leafUpdate(new BNode, old BNode, idx uint16, key []byte, val []byte) {
 	nodeAppendRange(new, old, idx+1, idx+1, old.nkeys()-(idx+1))
 }
 
+// remove a key from a leaf node
+func leafDelete(new BNode, old BNode, idx uint16) {
+	new.setHeader(BNODE_LEAF, old.nkeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendRange(new, old, idx, idx+1, old.nkeys()-(idx+1))
+}
 
+// merge 2 nodes to 1
+func nodeMerge(new BNode, left BNode, right BNode) {
+	new.setHeader(left.btype(), left.nkeys()+right.nkeys())
+	nodeAppendRange(new, left, 0, 0, left.nkeys())
+	nodeAppendRange(new, right, left.nkeys(), 0, right.nkeys())
+}
+
+// replace 2 adjacent links 
+func nodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte) {
+	new.setHeader(BNODE_NODE, old.nkeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendKV(new, idx, ptr, key, nil)
+	nodeAppendRange(new, old, idx+1, idx+2, old.nkeys()-(idx+2))
+}
 
 // find the last position that is less than or equal to the key
 func nodeLookupLE(node BNode, key []byte) uint16 {
