@@ -1,6 +1,9 @@
-package main 
+package main
 
-import "errors"
+import (
+	"bytes"
+	"errors"
+)
 
 func checkLimit(key []byte, val []byte) error {
 	if len(key) == 0 {
@@ -53,6 +56,56 @@ func (tree *BTree) Insert(key []byte, val []byte) error {
 	return nil
 }
 
+func treeDelete(tree *BTree, node BNode, key []byte) BNode {
+	idx := nodeLookupLE(node, key)
+	switch node.btype() {
+	case BNODE_LEAF:
+		if !bytes.Equal(key, node.getKey(idx)) {
+			return BNode{} // not found
+		}
+		new := BNode(make([]byte, BTREE_PAGE_SIZE))
+		leafDelete(new, node, idx)
+		return new
+	case BNODE_NODE:
+		return nodeDelete(tree, node, idx, key)
+	default:
+		panic("bad node!")
+	}
+}
+
+// delete a key from an internal node; part of treeDelete()
+func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
+	// recurse into the kid 
+	kptr := node.getPtr(idx)
+	updated := treeDelete(tree, tree.get(kptr), key)
+	if len(updated) == 0 {
+		return BNode{}
+	}
+	tree.del(kptr)
+
+	new := BNode(make([]byte, BTREE_PAGE_SIZE))
+	mergeDir, sibling := shouldMerge(tree, node, idx, updated)
+	switch {
+	case mergeDir < 0: // merge left
+		merged := BNode(make([]byte, BTREE_PAGE_SIZE))
+		nodeMerge(merged, sibling, updated)
+		tree.del(node.getPtr(idx-1))
+		nodeReplace2Kid(new, node, idx-1, tree.new(merged), merged.getKey(0))
+	case mergeDir > 0:
+		merged := BNode(make([]byte, BTREE_PAGE_SIZE))
+		nodeMerge(merged, sibling, updated)
+		tree.del(node.getPtr(idx+1))
+		nodeReplace2Kid(new, node, idx, tree.new(merged), merged.getKey(0))
+	case mergeDir == 0 && updated.nkeys() == 0:
+		assert(node.nkeys() == 1 && idx == 0)
+		new.setHeader(BNODE_NODE, 0)
+	case mergeDir == 0 && updated.nkeys() > 0: // no merge
+		nodeReplaceKidN(tree, new, node, idx, updated)
+	}
+
+	return new
+}
+
 // should the updated kid be merged with a sibling? 
 func shouldMerge(
 	tree *BTree, node BNode, idx uint16, updated BNode,
@@ -77,3 +130,28 @@ func shouldMerge(
 
 	return 0, BNode{}
 }
+
+// delete a key 
+func (tree *BTree) Delete(key []byte) (bool, error) {
+	if err := checkLimit(key, nil); err != nil {
+		return false, err
+	}
+	if tree.root == 0 {
+		return false, nil // empty tree
+	}
+
+	updated := treeDelete(tree, tree.get(tree.root), key)
+	if len(updated) == 0 {
+		return false, nil // not found
+	}
+
+	tree.del(tree.root)
+	if updated.btype() == BNODE_NODE && updated.nkeys() == 1 {
+		// remove a level: the root has a single child, promote it
+		tree.root = updated.getPtr(0)
+	} else {
+		tree.root = tree.new(updated)
+	}
+	return true, nil
+}
+
