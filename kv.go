@@ -91,9 +91,9 @@ func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 		nodeMerge(merged, sibling, updated)
 		tree.del(node.getPtr(idx-1))
 		nodeReplace2Kid(new, node, idx-1, tree.new(merged), merged.getKey(0))
-	case mergeDir > 0:
+	case mergeDir > 0: // merge right
 		merged := BNode(make([]byte, BTREE_PAGE_SIZE))
-		nodeMerge(merged, sibling, updated)
+		nodeMerge(merged, updated, sibling)
 		tree.del(node.getPtr(idx+1))
 		nodeReplace2Kid(new, node, idx, tree.new(merged), merged.getKey(0))
 	case mergeDir == 0 && updated.nkeys() == 0:

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"sort"
 	"testing"
 	"unsafe"
 )
@@ -37,14 +39,14 @@ func newTreeTest() *treeTest {
 	}
 }
 
-func (treeTest *treeTest) add(key string, val string) {
+func (treeTest *treeTest) insert(key string, val string) {
 	if err := treeTest.tree.Insert([]byte(key), []byte(val)); err != nil {
 		panic(err)
 	}
 	treeTest.ref[key] = val
 }
 
-func (treeTest *treeTest) del(key string) bool {
+func (treeTest *treeTest) remove(key string) bool {
 	deleted, err := treeTest.tree.Delete([]byte(key))
 	if err != nil {
 		panic(err)
@@ -80,7 +82,7 @@ func (treeTest *treeTest) dump() ([]string, []string) {
 	return keys[1:], vals[1:]
 }
 
-func (treeTest *treeTest) verify(t *testing.T) {
+func (treeTest *treeTest) verifyTree(t *testing.T) {
 	t.Helper()
 
 	if treeTest.tree.root != 0 {
@@ -108,12 +110,66 @@ func (treeTest *treeTest) verify(t *testing.T) {
 		walk(treeTest.tree.root)
 	}
 
-	// keys, vals := treeTest.dump()
-	// if len(keys) != len(treeTest.ref) {
-	// 	t.Fatalf("tree has %d keys, ref has %d", len(keys), len(c.ref))
-	// }
-	// want := make([]string, 0, len(treeTest.ref))
-	// for k := range treeTest.ref {
-	// 	want = append(want, k)
-	// }
+	keys, vals := treeTest.dump()
+	if len(keys) != len(treeTest.ref) {
+		t.Fatalf("tree has %d keys, ref has %d", len(keys), len(treeTest.ref))
+	}
+	want := make([]string, 0, len(treeTest.ref))
+	for k := range treeTest.ref {
+		want = append(want, k)
+	}
+	sort.Strings(want)
+	for i, k := range keys {
+		if k != want[i] {
+			t.Fatalf("key %d = %q, want %q", i, k, want[i])
+		}	
+		if vals[i] != treeTest.ref[k] {
+			t.Fatalf("val for %q = %q, want %q", k, vals[i], treeTest.ref[k])
+		}	
+	}
+}
+
+func TestBasic(t *testing.T) {
+	tree := newTreeTest()
+	tree.insert("k", "v")
+	tree.verifyTree(t)
+
+	// insert a lot to force splits
+	for i := 0; i < 25000; i++ {
+		tree.insert(fmt.Sprintf("key%d", i), fmt.Sprintf("vvv%d", i))
+	}
+	tree.verifyTree(t)
+
+	// delete a lot to force merges
+	for i := 0; i < 25000; i++ {
+		tree.remove(fmt.Sprintf("key%d", i))
+	}
+	tree.verifyTree(t)
+}
+
+func TestBigValues(t *testing.T) {
+	tree := newTreeTest()
+	for i := 0; i < 400; i++ {
+		val := make([]byte, BTREE_MAX_VAL_SIZE)
+		for j := range val {
+			val[j] = byte('a' + i%26)
+		}
+		tree.insert(fmt.Sprintf("key%d", i), string(val))
+	}
+	tree.verifyTree(t)
+	for i := 0; i < 400; i++ {
+		if !tree.remove(fmt.Sprintf("key%d", i)) {
+			t.Fatalf("delete key%d returned false", i)
+		}	
+	}
+	tree.verifyTree(t)
+}
+
+func TestDeleteMissing(t *testing.T) {
+	tree := newTreeTest()
+	tree.insert("a", "1")
+	if deleted, _ := tree.tree.Delete([]byte("fake")); deleted {
+		t.Fatal("deleted a key that was never there")
+	}
+	tree.verifyTree(t)
 }
