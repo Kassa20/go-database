@@ -188,19 +188,16 @@ func (db *KV) Open() error {
 
 	// get the size
 	var st syscall.Stat_t
-	if err = syscall.Fstat(db.fd, &st); err != nil {
-		goto fail
+	if err = syscall.Fstat(db.fd, &st); err == nil {
+		if err = extendMmap(db, int(st.Size)); err == nil {
+			err = readRoot(db, st.Size)
+		}
 	}
-	if err = extendMmap(db, int(st.Size)); err != nil {
-		goto fail
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("KV.Open: %w", err)
 	}
-	if err = readRoot(db, st.Size); err != nil {
-		goto fail
-	}
-
-fail:
-	db.Close()
-	return fmt.Errorf("KV.Open: %w", err)
+	return nil
 }
 
 func (db *KV) Close() {
