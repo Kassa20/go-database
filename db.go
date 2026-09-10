@@ -15,14 +15,16 @@ type KV struct {
 	Path string
 	fd   int
 	tree BTree
+	free FreeList
 
 	mmap struct {
 		total  int
 		chunks [][]byte
 	}
 	page struct {
-		flushed uint64   // database size in number of pages
-		temp    [][]byte // newly allocated pages, not yet on disk
+		flushed uint64            // database size in number of pages
+		nappend uint64            // number of pages to be appended
+		updates map[uint64][]byte // pending updates + appended pages
 	}
 	failed bool // did the last update fail?
 }
@@ -51,7 +53,7 @@ func createFileSync(file string) (int, error) {
 }
 
 // read a page from disk
-func (db *KV) pageRead(ptr uint64) []byte {
+func (db *KV) pageReadFile(ptr uint64) []byte {
 	start := uint64(0)
 	for _, chunk := range db.mmap.chunks {
 		end := start + uint64(len(chunk))/BTREE_PAGE_SIZE
@@ -64,12 +66,40 @@ func (db *KV) pageRead(ptr uint64) []byte {
 	panic("bad ptr")
 }
 
+func (db *KV) pageRead(ptr uint64) []byte {
+	if node, ok := db.page.updates[ptr]; ok {
+		return node
+	}
+	return db.pageReadFile(ptr)
+}
+
 // add a new page, written to disk later. return its page number
 func (db *KV) pageAppend(node []byte) uint64 {
 	assert(len(node) == BTREE_PAGE_SIZE)
-	ptr := db.page.flushed + uint64(len(db.page.temp))
-	db.page.temp = append(db.page.temp, node)
+	ptr := db.page.flushed + db.page.nappend
+	db.page.nappend++
+	db.page.updates[ptr] = node
 	return ptr
+}
+
+// reuse from freelist or append
+func (db *KV) pageAlloc(node []byte) uint64 {
+	assert(len(node) == BTREE_PAGE_SIZE)
+	if ptr := db.free.PopHead(); ptr != 0 {
+		db.page.updates[ptr] = node
+		return ptr
+	}
+	return db.pageAppend(node)
+}
+
+func (db *KV) pageWrite(ptr uint64) []byte {
+	if node, ok := db.page.updates[ptr]; ok {
+		return node
+	}
+	node := make([]byte, BTREE_PAGE_SIZE)
+	copy(node, db.pageReadFile(ptr))
+	db.page.updates[ptr] = node
+	return node
 }
 
 func extendMmap(db *KV, size int) error {
@@ -96,21 +126,33 @@ func extendMmap(db *KV, size int) error {
 }
 
 func saveMeta(db *KV) []byte {
-	var data [32]byte
+	var data [64]byte
 	copy(data[:16], []byte(DB_SIG))
-	binary.LittleEndian.PutUint64(data[16:], db.tree.root)
-	binary.LittleEndian.PutUint64(data[24:], db.page.flushed)
+	binary.LittleEndian.PutUint64(data[16:24], db.tree.root)
+	binary.LittleEndian.PutUint64(data[24:32], db.page.flushed)
+	binary.LittleEndian.PutUint64(data[32:40], db.free.headPage)
+	binary.LittleEndian.PutUint64(data[40:48], db.free.headSeq)
+	binary.LittleEndian.PutUint64(data[48:56], db.free.tailPage)
+	binary.LittleEndian.PutUint64(data[56:64], db.free.tailSeq)
 	return data[:]
 }
 
 func loadMeta(db *KV, data []byte) {
 	db.tree.root = binary.LittleEndian.Uint64(data[16:24])
 	db.page.flushed = binary.LittleEndian.Uint64(data[24:32])
+	db.free.headPage = binary.LittleEndian.Uint64(data[32:40])
+	db.free.headSeq = binary.LittleEndian.Uint64(data[40:48])
+	db.free.tailPage = binary.LittleEndian.Uint64(data[48:56])
+	db.free.tailSeq = binary.LittleEndian.Uint64(data[56:64])
+	db.free.maxSeq = db.free.tailSeq // ← NOT in the book. Read the note below.
 }
 
 func readRoot(db *KV, fileSize int64) error {
 	if fileSize == 0 { // empty file
-		db.page.flushed = 1 // the meta page is reserved on the 1st write
+		db.page.flushed = 2 // the meta page is reserved on the 1st write
+		db.free.headPage = 1
+		db.free.tailPage = 1
+		db.page.updates[1] = make([]byte, BTREE_PAGE_SIZE)
 		return nil
 	}
 	if fileSize%BTREE_PAGE_SIZE != 0 {
@@ -124,8 +166,12 @@ func readRoot(db *KV, fileSize int64) error {
 	}
 	loadMeta(db, data)
 
-	bad := db.page.flushed < 1 || db.page.flushed > uint64(fileSize/BTREE_PAGE_SIZE)
+	maxPages := uint64(fileSize / BTREE_PAGE_SIZE)
+	bad := db.page.flushed < 2 || db.page.flushed > maxPages
 	bad = bad || db.tree.root >= db.page.flushed
+	bad = bad || db.free.headPage == 0 || db.free.headPage >= db.page.flushed
+	bad = bad || db.free.tailPage == 0 || db.free.tailPage >= db.page.flushed
+	bad = bad || db.free.headSeq > db.free.tailSeq
 	if bad {
 		return fmt.Errorf("bad meta page")
 	}
@@ -134,23 +180,22 @@ func readRoot(db *KV, fileSize int64) error {
 
 // 1. write the newly allocated pages to the end of the file
 func writePages(db *KV) error {
-	size := (int(db.page.flushed) + len(db.page.temp)) * BTREE_PAGE_SIZE
+	size := (int(db.page.flushed) + int(db.page.nappend)) * BTREE_PAGE_SIZE
 	if err := extendMmap(db, size); err != nil {
 		return err
 	}
 
-	offset := int64(db.page.flushed) * BTREE_PAGE_SIZE
-	buf := make([]byte, 0, len(db.page.temp)*BTREE_PAGE_SIZE)
-	for _, page := range db.page.temp {
-		buf = append(buf, page...)
+	for ptr, page := range db.page.updates {
+		assert(len(page) == BTREE_PAGE_SIZE)
+		offset := int64(ptr) * BTREE_PAGE_SIZE
+		if _, err := syscall.Pwrite(db.fd, page, offset); err != nil {
+			return fmt.Errorf("write page %d: %w", ptr, err)
+		}
 	}
-	if _, err := syscall.Pwrite(db.fd, buf, offset); err != nil {
-		return err
-	}
-
 	// discard in-memory data
-	db.page.flushed += uint64(len(db.page.temp))
-	db.page.temp = db.page.temp[:0]
+	db.page.flushed += db.page.nappend
+	db.page.nappend = 0
+	clear(db.page.updates)
 	return nil
 }
 
@@ -172,13 +217,28 @@ func updateFile(db *KV) error {
 	if err := updateRoot(db); err != nil {
 		return err
 	}
-	return syscall.Fsync(db.fd)
+
+	if err := syscall.Fsync(db.fd); err != nil {
+		return err
+	}
+
+	db.free.SetMaxSeq()
+	return nil
 }
 
 func (db *KV) Open() error {
-	db.tree.get = db.pageRead
-	db.tree.new = db.pageAppend
-	db.tree.del = func(uint65 uint64) {}
+	// reset in case of a reopen
+	db.page.updates = map[uint64][]byte{}
+	db.page.nappend = 0
+	db.failed = false
+
+	// B+tree callbacks
+	db.tree.get = db.pageRead      // read a page
+	db.tree.new = db.pageAlloc     // (new) reuse from the free list or append
+	db.tree.del = db.free.PushTail // (new) freed pages go to the free list
+	db.free.get = db.pageRead      // read a page
+	db.free.new = db.pageAppend    // append a page
+	db.free.set = db.pageWrite     // (new) in-place updates
 
 	fd, err := createFileSync(db.Path)
 	if err != nil {
@@ -186,7 +246,6 @@ func (db *KV) Open() error {
 	}
 	db.fd = fd
 
-	// get the size
 	var st syscall.Stat_t
 	if err = syscall.Fstat(db.fd, &st); err == nil {
 		if err = extendMmap(db, int(st.Size)); err == nil {
@@ -236,7 +295,8 @@ func updateOrRevert(db *KV, meta []byte) error {
 		// the in-memory state is reverted immediately to allow reads
 		loadMeta(db, meta)
 		// discard temporaries
-		db.page.temp = db.page.temp[:0]
+		clear(db.page.updates)
+		db.page.nappend = 0
 	}
 	return err
 }
